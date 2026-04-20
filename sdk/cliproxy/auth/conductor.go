@@ -171,6 +171,9 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// Rate limit error statistics (daily counters)
+	rateLimitStats *RateLimitStats
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -189,6 +192,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
+		rateLimitStats:   NewRateLimitStats(),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -1933,7 +1937,10 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
-	if status != http.StatusTooManyRequests {
+	// Check for 429 or rate limit disguised as 400
+	// Use checkRateLimitWithStats for 400 errors to track statistics
+	isRateLimit := status == http.StatusTooManyRequests || (status == http.StatusBadRequest && m.checkRateLimitWithStats(err))
+	if !isRateLimit {
 		return 0, false
 	}
 	if !m.retryAllowed(attempt, providers) {
@@ -2394,6 +2401,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // and all 422 responses as request-shape failures, where switching auths or
 // pooled upstream models will not help. Model-support errors are excluded so
 // routing can fall through to another auth or upstream.
+//
+// Rate limit errors disguised as 400 (e.g., ModelArts.81101, TooManyRequests type)
+// are treated as retryable and return false.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2404,6 +2414,10 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
+		// Check if this is actually a rate limit error disguised as 400
+		if isRateLimitDisguisedAs400(err) {
+			return false
+		}
 		return strings.Contains(err.Error(), "invalid_request_error")
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
@@ -2412,6 +2426,94 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isRateLimitDisguisedAs400 detects rate limit errors that some providers
+// incorrectly return with HTTP 400 status code instead of 429.
+// Examples include:
+// - ModelArts.81101 (Huawei Cloud)
+// - Decode server overloaded
+// - "TooManyRequests" type in error body
+// - "rate limit" or "rate_limit" in error message
+func isRateLimitDisguisedAs400(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// Check for known rate limit error codes
+	if strings.Contains(errStr, "ModelArts.81101") {
+		return true
+	}
+	// Check for Decode server overloaded (case-insensitive)
+	lowerErr := strings.ToLower(errStr)
+	if strings.Contains(lowerErr, "decode server is overloaded") ||
+		strings.Contains(lowerErr, "decode server overloaded") {
+		return true
+	}
+	// Check for TooManyRequests type in error body
+	if strings.Contains(errStr, `"type":"TooManyRequests"`) ||
+		strings.Contains(errStr, `'type':'TooManyRequests'`) {
+		return true
+	}
+	// Check for common rate limit indicators (case-insensitive)
+	if strings.Contains(lowerErr, "too many requests") {
+		return true
+	}
+	// Check for "rate limit exceeded" or "rate_limit exceeded"
+	if (strings.Contains(lowerErr, "rate limit") || strings.Contains(lowerErr, "rate_limit")) &&
+		strings.Contains(lowerErr, "exceeded") {
+		return true
+	}
+	return false
+}
+
+// detectRateLimitErrorType identifies the specific type of rate limit error.
+// Returns "ModelArts81101", "DecodeServerOverloaded", or empty string if not a recognized type.
+func detectRateLimitErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "ModelArts.81101") {
+		return "ModelArts81101"
+	}
+	lowerErr := strings.ToLower(errStr)
+	if strings.Contains(lowerErr, "decode server is overloaded") ||
+		strings.Contains(lowerErr, "decode server overloaded") {
+		return "DecodeServerOverloaded"
+	}
+	return ""
+}
+
+// checkRateLimitWithStats checks if an error is a rate limit disguised as 400,
+// increments statistics if so, and logs the error with current daily stats.
+// Returns true if the error is a rate limit error.
+func (m *Manager) checkRateLimitWithStats(err error) bool {
+	if !isRateLimitDisguisedAs400(err) {
+		return false
+	}
+
+	// Determine error type and increment appropriate counter
+	errorType := detectRateLimitErrorType(err)
+	if m.rateLimitStats != nil {
+		switch errorType {
+		case "ModelArts81101":
+			m.rateLimitStats.IncrementModelArts81101()
+		case "DecodeServerOverloaded":
+			m.rateLimitStats.IncrementDecodeServerOverloaded()
+		}
+
+		// Log with current stats
+		date, modelArts, decodeServer := m.rateLimitStats.GetStats()
+		log.WithFields(log.Fields{
+			"error_type":                     errorType,
+			"model_arts_81101_today":         modelArts,
+			"decode_server_overloaded_today": decodeServer,
+			"date":                           date,
+		}).Warn("[RATE_LIMIT_STATS] Rate limit error detected")
+	}
+
+	return true
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
