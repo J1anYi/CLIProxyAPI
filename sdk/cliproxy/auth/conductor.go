@@ -1937,9 +1937,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
-	// Check for 429 or rate limit disguised as 400
+	// Check for 429, 406, or rate limit disguised as 400
 	// Use checkRateLimitWithStats for 400 errors to track statistics
-	isRateLimit := status == http.StatusTooManyRequests || (status == http.StatusBadRequest && m.checkRateLimitWithStats(err))
+	// 406 errors are temporary model failures, should retry
+	isRateLimit := status == http.StatusTooManyRequests ||
+		(status == http.StatusNotAcceptable && m.checkError406WithStats(err)) ||
+		(status == http.StatusBadRequest && m.checkRateLimitWithStats(err))
 	if !isRateLimit {
 		return 0, false
 	}
@@ -2433,6 +2436,7 @@ func isRequestInvalidError(err error) bool {
 // Examples include:
 // - ModelArts.81101 (Huawei Cloud)
 // - Decode server overloaded
+// - 406 errors (temporary model failures)
 // - "TooManyRequests" type in error body
 // - "rate limit" or "rate_limit" in error message
 func isRateLimitDisguisedAs400(err error) bool {
@@ -2448,6 +2452,10 @@ func isRateLimitDisguisedAs400(err error) bool {
 	lowerErr := strings.ToLower(errStr)
 	if strings.Contains(lowerErr, "decode server is overloaded") ||
 		strings.Contains(lowerErr, "decode server overloaded") {
+		return true
+	}
+	// Check for 406 errors (temporary model failures, should retry)
+	if strings.Contains(errStr, `"code":406`) {
 		return true
 	}
 	// Check for TooManyRequests type in error body
@@ -2468,7 +2476,7 @@ func isRateLimitDisguisedAs400(err error) bool {
 }
 
 // detectRateLimitErrorType identifies the specific type of rate limit error.
-// Returns "ModelArts81101", "DecodeServerOverloaded", or empty string if not a recognized type.
+// Returns "ModelArts81101", "DecodeServerOverloaded", "Error406", "ContextLengthExceeded", or empty string if not a recognized type.
 func detectRateLimitErrorType(err error) string {
 	if err == nil {
 		return ""
@@ -2482,37 +2490,86 @@ func detectRateLimitErrorType(err error) string {
 		strings.Contains(lowerErr, "decode server overloaded") {
 		return "DecodeServerOverloaded"
 	}
+	// Check for 406 errors
+	if strings.Contains(errStr, `"code":406`) {
+		return "Error406"
+	}
+	// Check for context length exceeded (for logging only, not retry)
+	if strings.Contains(lowerErr, "exceeds the model's maximum context length") ||
+		strings.Contains(lowerErr, "requested token count exceeds") {
+		return "ContextLengthExceeded"
+	}
 	return ""
 }
 
 // checkRateLimitWithStats checks if an error is a rate limit disguised as 400,
 // increments statistics if so, and logs the error with current daily stats.
 // Returns true if the error is a rate limit error.
+// Also logs ContextLengthExceeded errors (not retryable, but tracked for observability).
 func (m *Manager) checkRateLimitWithStats(err error) bool {
+	// First check for ContextLengthExceeded (log only, not retryable)
+	errorType := detectRateLimitErrorType(err)
+	if errorType == "ContextLengthExceeded" && m.rateLimitStats != nil {
+		m.rateLimitStats.IncrementContextLengthExceeded()
+		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
+		log.WithFields(log.Fields{
+			"error_type":                     errorType,
+			"model_arts_81101_today":         modelArts,
+			"decode_server_overloaded_today": decodeServer,
+			"error_406_today":                error406,
+			"context_length_exceeded_today":  ctxLen,
+			"date":                           date,
+		}).Warn("[RATE_LIMIT_STATS] Context length exceeded (not retryable)")
+		return false // Not retryable
+	}
+
 	if !isRateLimitDisguisedAs400(err) {
 		return false
 	}
 
 	// Determine error type and increment appropriate counter
-	errorType := detectRateLimitErrorType(err)
 	if m.rateLimitStats != nil {
 		switch errorType {
 		case "ModelArts81101":
 			m.rateLimitStats.IncrementModelArts81101()
 		case "DecodeServerOverloaded":
 			m.rateLimitStats.IncrementDecodeServerOverloaded()
+		case "Error406":
+			m.rateLimitStats.IncrementError406()
 		}
 
 		// Log with current stats
-		date, modelArts, decodeServer := m.rateLimitStats.GetStats()
+		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     errorType,
 			"model_arts_81101_today":         modelArts,
 			"decode_server_overloaded_today": decodeServer,
+			"error_406_today":                error406,
+			"context_length_exceeded_today":  ctxLen,
 			"date":                           date,
 		}).Warn("[RATE_LIMIT_STATS] Rate limit error detected")
 	}
 
+	return true
+}
+
+// checkError406WithStats handles 406 errors - logs and increments stats.
+// Returns true to indicate retry is allowed.
+func (m *Manager) checkError406WithStats(err error) bool {
+	if m.rateLimitStats != nil {
+		m.rateLimitStats.IncrementError406()
+
+		// Log with current stats
+		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
+		log.WithFields(log.Fields{
+			"error_type":                     "Error406",
+			"model_arts_81101_today":         modelArts,
+			"decode_server_overloaded_today": decodeServer,
+			"error_406_today":                error406,
+			"context_length_exceeded_today":  ctxLen,
+			"date":                           date,
+		}).Warn("[RATE_LIMIT_STATS] 406 error detected")
+	}
 	return true
 }
 
