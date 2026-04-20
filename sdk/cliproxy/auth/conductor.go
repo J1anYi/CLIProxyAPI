@@ -1950,7 +1950,15 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	retryAfter := retryAfterFromError(err)
-	if retryAfter == nil || *retryAfter <= 0 || *retryAfter > maxWait {
+	// For rate limit errors without retry-after header, use default 1 second wait
+	if retryAfter == nil || *retryAfter <= 0 {
+		defaultWait := time.Second
+		if defaultWait > maxWait {
+			return 0, false
+		}
+		return defaultWait, true
+	}
+	if *retryAfter > maxWait {
 		return 0, false
 	}
 	return *retryAfter, true
