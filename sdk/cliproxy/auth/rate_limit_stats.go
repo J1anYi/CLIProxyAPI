@@ -11,6 +11,7 @@ type RateLimitStats struct {
 	mu                     sync.Mutex
 	date                   string // YYYY-MM-DD format
 	modelArts81101         int64
+	modelArts81011         int64 // sensitive info error
 	decodeServerOverloaded int64
 	error406               int64
 	contextLengthExceeded  int64
@@ -30,6 +31,15 @@ func (s *RateLimitStats) IncrementModelArts81101() {
 	defer s.mu.Unlock()
 	s.checkDateRollover()
 	s.modelArts81101++
+}
+
+// IncrementModelArts81011 increments the counter for ModelArts.81011 sensitive info errors.
+// If the date has changed, counters are reset before incrementing.
+func (s *RateLimitStats) IncrementModelArts81011() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkDateRollover()
+	s.modelArts81011++
 }
 
 // IncrementDecodeServerOverloaded increments the counter for Decode server overloaded errors.
@@ -61,11 +71,11 @@ func (s *RateLimitStats) IncrementContextLengthExceeded() {
 
 // GetStats returns the current date and counters.
 // If the date has changed, counters are reset before returning.
-func (s *RateLimitStats) GetStats() (date string, modelArts81101, decodeServerOverloaded, error406, contextLengthExceeded int64) {
+func (s *RateLimitStats) GetStats() (date string, modelArts81101, modelArts81011, decodeServerOverloaded, error406, contextLengthExceeded int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkDateRollover()
-	return s.date, s.modelArts81101, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded
+	return s.date, s.modelArts81101, s.modelArts81011, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded
 }
 
 // checkDateRollover resets counters if the date has changed.
@@ -75,6 +85,7 @@ func (s *RateLimitStats) checkDateRollover() {
 	if s.date != today {
 		s.date = today
 		s.modelArts81101 = 0
+		s.modelArts81011 = 0
 		s.decodeServerOverloaded = 0
 		s.error406 = 0
 		s.contextLengthExceeded = 0
