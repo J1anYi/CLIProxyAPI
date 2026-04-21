@@ -851,3 +851,69 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestCalculateRateLimitBackoff(t *testing.T) {
+	// Helper to check if a value is within expected range
+	assertWithinRange := func(t *testing.T, got, min, max time.Duration) {
+		t.Helper()
+		if got < min || got > max {
+			t.Errorf("expected duration in range [%v, %v], got %v", min, max, got)
+		}
+	}
+
+	t.Run("attempt 0 returns between 1s and 1.3s", func(t *testing.T) {
+		// Attempt 0: delay = 1s, jitter max = 0.3 * 1s = 0.3s, total max = 1.3s
+		got := calculateRateLimitBackoff(0)
+		assertWithinRange(t, got, time.Second, 1300*time.Millisecond)
+	})
+
+	t.Run("attempt 1 returns between 2s and 2.6s", func(t *testing.T) {
+		// Attempt 1: delay = 2s, jitter max = 0.3 * 2s = 0.6s, total max = 2.6s
+		got := calculateRateLimitBackoff(1)
+		assertWithinRange(t, got, 2*time.Second, 2600*time.Millisecond)
+	})
+
+	t.Run("attempt 2 returns between 4s and 5.2s", func(t *testing.T) {
+		// Attempt 2: delay = 4s, jitter max = 0.3 * 4s = 1.2s, total max = 5.2s
+		got := calculateRateLimitBackoff(2)
+		assertWithinRange(t, got, 4*time.Second, 5200*time.Millisecond)
+	})
+
+	t.Run("attempt 5 returns capped at 30s with jitter", func(t *testing.T) {
+		// Attempt 5: delay would be 32s but capped at 30s, jitter max = 0.3 * 30s = 9s, total max = 39s
+		got := calculateRateLimitBackoff(5)
+		assertWithinRange(t, got, 30*time.Second, 39*time.Second)
+	})
+
+	t.Run("attempt 10 returns capped at 30s with jitter", func(t *testing.T) {
+		// High attempt should still be capped at 30s
+		got := calculateRateLimitBackoff(10)
+		assertWithinRange(t, got, 30*time.Second, 39*time.Second)
+	})
+
+	t.Run("negative attempt is treated as 0", func(t *testing.T) {
+		// Negative attempt should be treated as 0
+		got := calculateRateLimitBackoff(-1)
+		assertWithinRange(t, got, time.Second, 1300*time.Millisecond)
+	})
+
+	t.Run("jitter is random across multiple calls", func(t *testing.T) {
+		// With random jitter, multiple calls with same attempt should vary
+		values := make([]time.Duration, 10)
+		for i := range values {
+			values[i] = calculateRateLimitBackoff(0)
+		}
+
+		// Check that not all values are identical (very unlikely with jitter)
+		allSame := true
+		for i := 1; i < len(values); i++ {
+			if values[i] != values[0] {
+				allSame = false
+				break
+			}
+		}
+		if allSame {
+			t.Error("expected jitter to produce varying values, but all were identical")
+		}
+	})
+}
