@@ -1974,9 +1974,9 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	retryAfter := retryAfterFromError(err)
-	// For rate limit errors without retry-after header, use default 1 second wait
+	// For rate limit errors without retry-after header, use exponential backoff
 	if retryAfter == nil || *retryAfter <= 0 {
-		defaultWait := time.Second
+		defaultWait := calculateRateLimitBackoff(attempt)
 		if defaultWait > maxWait {
 			return 0, false
 		}
