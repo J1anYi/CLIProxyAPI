@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -66,6 +67,9 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+	rateLimitBackoffBase  = time.Second
+	rateLimitBackoffMax   = 30 * time.Second
+	rateLimitJitterRatio = 0.3
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -82,6 +86,26 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 		}
 	}
 	return quotaCooldownDisabled.Load()
+}
+
+// calculateRateLimitBackoff returns an exponential backoff delay with jitter for rate limit retries.
+// Negative attempt values are treated as 0.
+func calculateRateLimitBackoff(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	// Calculate exponential delay: base * 2^attempt
+	delay := rateLimitBackoffBase
+	for i := 0; i < attempt && delay < rateLimitBackoffMax; i++ {
+		delay *= 2
+		if delay > rateLimitBackoffMax {
+			delay = rateLimitBackoffMax
+			break
+		}
+	}
+	// Add jitter: random(0, jitterRatio * delay)
+	jitter := time.Duration(rand.Float64() * rateLimitJitterRatio * float64(delay))
+	return delay + jitter
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -2443,6 +2467,7 @@ func isRequestInvalidError(err error) bool {
 // incorrectly return with HTTP 400 status code instead of 429.
 // Examples include:
 // - ModelArts.81101 (Huawei Cloud)
+// - ModelArts.81011 (sensitive info detection - often false positive, retryable)
 // - Decode server overloaded
 // - 406 errors (temporary model failures)
 // - "TooManyRequests" type in error body
@@ -2454,6 +2479,10 @@ func isRateLimitDisguisedAs400(err error) bool {
 	errStr := err.Error()
 	// Check for known rate limit error codes
 	if strings.Contains(errStr, "ModelArts.81101") {
+		return true
+	}
+	// Check for ModelArts.81011 sensitive info error (often false positive, retryable)
+	if strings.Contains(errStr, "ModelArts.81011") {
 		return true
 	}
 	// Check for Decode server overloaded (case-insensitive)
@@ -2484,7 +2513,7 @@ func isRateLimitDisguisedAs400(err error) bool {
 }
 
 // detectRateLimitErrorType identifies the specific type of rate limit error.
-// Returns "ModelArts81101", "DecodeServerOverloaded", "Error406", "ContextLengthExceeded", or empty string if not a recognized type.
+// Returns "ModelArts81101", "ModelArts81011", "DecodeServerOverloaded", "Error406", "ContextLengthExceeded", or empty string if not a recognized type.
 func detectRateLimitErrorType(err error) string {
 	if err == nil {
 		return ""
@@ -2492,6 +2521,9 @@ func detectRateLimitErrorType(err error) string {
 	errStr := err.Error()
 	if strings.Contains(errStr, "ModelArts.81101") {
 		return "ModelArts81101"
+	}
+	if strings.Contains(errStr, "ModelArts.81011") {
+		return "ModelArts81011"
 	}
 	lowerErr := strings.ToLower(errStr)
 	if strings.Contains(lowerErr, "decode server is overloaded") ||
@@ -2519,10 +2551,11 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 	errorType := detectRateLimitErrorType(err)
 	if errorType == "ContextLengthExceeded" && m.rateLimitStats != nil {
 		m.rateLimitStats.IncrementContextLengthExceeded()
-		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     errorType,
-			"model_arts_81101_today":         modelArts,
+			"model_arts_81101_today":         modelArts81101,
+			"model_arts_81011_today":         modelArts81011,
 			"decode_server_overloaded_today": decodeServer,
 			"error_406_today":                error406,
 			"context_length_exceeded_today":  ctxLen,
@@ -2540,6 +2573,8 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 		switch errorType {
 		case "ModelArts81101":
 			m.rateLimitStats.IncrementModelArts81101()
+		case "ModelArts81011":
+			m.rateLimitStats.IncrementModelArts81011()
 		case "DecodeServerOverloaded":
 			m.rateLimitStats.IncrementDecodeServerOverloaded()
 		case "Error406":
@@ -2547,10 +2582,11 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 		}
 
 		// Log with current stats
-		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     errorType,
-			"model_arts_81101_today":         modelArts,
+			"model_arts_81101_today":         modelArts81101,
+			"model_arts_81011_today":         modelArts81011,
 			"decode_server_overloaded_today": decodeServer,
 			"error_406_today":                error406,
 			"context_length_exceeded_today":  ctxLen,
@@ -2568,10 +2604,11 @@ func (m *Manager) checkError406WithStats(err error) bool {
 		m.rateLimitStats.IncrementError406()
 
 		// Log with current stats
-		date, modelArts, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     "Error406",
-			"model_arts_81101_today":         modelArts,
+			"model_arts_81101_today":         modelArts81101,
+			"model_arts_81011_today":         modelArts81011,
 			"decode_server_overloaded_today": decodeServer,
 			"error_406_today":                error406,
 			"context_length_exceeded_today":  ctxLen,
