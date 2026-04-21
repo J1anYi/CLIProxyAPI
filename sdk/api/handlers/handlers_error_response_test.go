@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -109,5 +110,174 @@ func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
+	}
+}
+
+func TestIsContextLengthError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errText  string
+		expected bool
+	}{
+		{
+			name:     "exceeds maximum context length",
+			errText:  "Requested token count exceeds the model's maximum context length of 202752 tokens",
+			expected: true,
+		},
+		{
+			name:     "requested token count exceeds",
+			errText:  "Requested token count exceeds the model's maximum context length",
+			expected: true,
+		},
+		{
+			name:     "case insensitive",
+			errText:  "EXCEEDS THE MODEL'S MAXIMUM CONTEXT LENGTH",
+			expected: true,
+		},
+		{
+			name:     "other error",
+			errText:  "rate limit exceeded",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			errText:  "",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isContextLengthError(tt.errText); got != tt.expected {
+				t.Errorf("isContextLengthError(%q) = %v, want %v", tt.errText, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractTokenCounts(t *testing.T) {
+	tests := []struct {
+		name           string
+		errText        string
+		wantInput      int
+		wantMax        int
+		wantFound      bool
+	}{
+		{
+			name:      "full Anthropic error format",
+			errText:   "Requested token count exceeds the model's maximum context length of 202752 tokens. You requested a total of 204909 tokens: 172909 tokens from the input messages and 32000 tokens for the completion.",
+			wantInput: 172909,
+			wantMax:   202752,
+			wantFound: true,
+		},
+		{
+			name:      "only context length",
+			errText:   "exceeds the model's maximum context length of 4096 tokens",
+			wantInput: 0,
+			wantMax:   4096,
+			wantFound: false,
+		},
+		{
+			name:      "total tokens requested",
+			errText:   "You requested a total of 53428 tokens, max 4096 tokens",
+			wantInput: 53428,
+			wantMax:   4096,
+			wantFound: true,
+		},
+		{
+			name:      "no token info",
+			errText:   "some other error message",
+			wantInput: 0,
+			wantMax:   0,
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputTokens, maxTokens, found := extractTokenCounts(tt.errText)
+			if inputTokens != tt.wantInput {
+				t.Errorf("inputTokens = %d, want %d", inputTokens, tt.wantInput)
+			}
+			if maxTokens != tt.wantMax {
+				t.Errorf("maxTokens = %d, want %d", maxTokens, tt.wantMax)
+			}
+			if found != tt.wantFound {
+				t.Errorf("found = %v, want %v", found, tt.wantFound)
+			}
+		})
+	}
+}
+
+func TestBuildContextLengthExceededError(t *testing.T) {
+	data := buildContextLengthExceededError(172909, 202752)
+
+	var resp contextLengthExceededResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Type != "error" {
+		t.Errorf("type = %q, want %q", resp.Type, "error")
+	}
+	if resp.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want %q", resp.Error.Type, "invalid_request_error")
+	}
+	if !strings.Contains(resp.Error.Message, "input_length and max_tokens exceed context limit") {
+		t.Errorf("error.message should contain 'input_length and max_tokens exceed context limit', got %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "172909") {
+		t.Errorf("error.message should contain input token count, got %q", resp.Error.Message)
+	}
+}
+
+func TestBuildErrorResponseBody_ContextLengthError(t *testing.T) {
+	errText := `{"error": {"object": "error", "message": "Requested token count exceeds the model's maximum context length of 202752 tokens. You requested a total of 204909 tokens: 172909 tokens from the input messages and 32000 tokens for the completion.", "type": "BadRequestError", "param": null, "code": 400}}`
+
+	data := BuildErrorResponseBody(http.StatusBadRequest, errText)
+
+	var resp contextLengthExceededResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Type != "error" {
+		t.Errorf("type = %q, want %q", resp.Type, "error")
+	}
+	if resp.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want %q", resp.Error.Type, "invalid_request_error")
+	}
+}
+
+func TestBuildErrorResponseBody_ContextLengthErrorNoTokens(t *testing.T) {
+	errText := "exceeds the model's maximum context length"
+
+	data := BuildErrorResponseBody(http.StatusBadRequest, errText)
+
+	var resp contextLengthExceededResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Type != "error" {
+		t.Errorf("type = %q, want %q", resp.Type, "error")
+	}
+	if resp.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want %q", resp.Error.Type, "invalid_request_error")
+	}
+}
+
+func TestBuildErrorResponseBody_NonContextLengthError(t *testing.T) {
+	errText := "rate limit exceeded"
+
+	data := BuildErrorResponseBody(http.StatusTooManyRequests, errText)
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Error.Type != "rate_limit_error" {
+		t.Errorf("error.type = %q, want %q", resp.Error.Type, "rate_limit_error")
 	}
 }

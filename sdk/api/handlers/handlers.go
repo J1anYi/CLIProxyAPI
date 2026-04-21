@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -91,14 +93,120 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
+// isContextLengthError checks if the error text indicates a context length exceeded error.
+// This detects errors from various AI providers that indicate the prompt is too long.
+func isContextLengthError(errText string) bool {
+	lower := strings.ToLower(errText)
+	return strings.Contains(lower, "exceeds the model's maximum context length") ||
+		strings.Contains(lower, "requested token count exceeds")
+}
+
+// extractTokenCounts extracts input and max token counts from context length error messages.
+// Returns (inputTokens, maxTokens, found) where found indicates if both values were extracted.
+// Supports formats like:
+//   - "You requested a total of 204909 tokens: 172909 tokens from the input messages"
+//   - "exceeds the model's maximum context length of 202752 tokens"
+func extractTokenCounts(errText string) (inputTokens, maxTokens int, found bool) {
+	// Pattern 1: "You requested a total of X tokens: Y tokens from the input messages"
+	// This pattern appears in Anthropic's error messages
+	inputPattern := regexp.MustCompile(`(\d+)\s+tokens\s+from\s+the\s+input\s+messages`)
+	if match := inputPattern.FindStringSubmatch(errText); len(match) > 1 {
+		inputTokens = parseInt(match[1])
+	}
+
+	// Pattern 2: "maximum context length of X tokens" or "context length of X tokens"
+	maxPattern := regexp.MustCompile(`context\s+length\s+of\s+(\d+)\s+tokens`)
+	if match := maxPattern.FindStringSubmatch(errText); len(match) > 1 {
+		maxTokens = parseInt(match[1])
+	}
+
+	// Pattern 3: "max X tokens" (alternative format)
+	if maxTokens == 0 {
+		maxAltPattern := regexp.MustCompile(`max\s+(\d+)\s+tokens`)
+		if match := maxAltPattern.FindStringSubmatch(errText); len(match) > 1 {
+			maxTokens = parseInt(match[1])
+		}
+	}
+
+	// Pattern 4: "You requested a total of X tokens" (total requested, use as input if input not found)
+	if inputTokens == 0 {
+		totalPattern := regexp.MustCompile(`requested\s+a\s+total\s+of\s+(\d+)\s+tokens`)
+		if match := totalPattern.FindStringSubmatch(errText); len(match) > 1 {
+			inputTokens = parseInt(match[1])
+		}
+	}
+
+	found = inputTokens > 0 && maxTokens > 0
+	return
+}
+
+// parseInt safely parses a string to int, returning 0 on error.
+func parseInt(s string) int {
+	var result int
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			result = result*10 + int(c-'0')
+		}
+	}
+	return result
+}
+
+// contextLengthExceededResponse represents the Anthropic-compatible error response for context length exceeded.
+// This format follows the official Anthropic API error schema to ensure Claude Code can properly handle it.
+type contextLengthExceededResponse struct {
+	Type      string `json:"type"`
+	Error     struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// buildContextLengthExceededError builds an Anthropic-compatible invalid_request_error response.
+// Using "invalid_request_error" type with a clear message about context length being exceeded.
+func buildContextLengthExceededError(inputTokens, maxTokens int) []byte {
+	resp := contextLengthExceededResponse{
+		Type: "error",
+	}
+	resp.Error.Type = "invalid_request_error"
+	resp.Error.Message = fmt.Sprintf("input_length and max_tokens exceed context limit: %d + max_tokens > %d. Please reduce the length of the messages or the completion.", inputTokens, maxTokens)
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return []byte(fmt.Sprintf(`{"type":"error","error":{"type":"invalid_request_error","message":"input_length and max_tokens exceed context limit: %d + max_tokens > %d"}}`, inputTokens, maxTokens))
+	}
+	return data
+}
+
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// For context length exceeded errors, it converts to a standardized prompt_too_long format
+// that Claude Code can recognize to trigger automatic context compaction.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
 	if strings.TrimSpace(errText) == "" {
 		errText = http.StatusText(status)
+	}
+
+	// Check for context length exceeded error and convert to Anthropic-compatible format
+	// Using "invalid_request_error" type which is the official Anthropic error type for this case
+	if isContextLengthError(errText) {
+		inputTokens, maxTokens, found := extractTokenCounts(errText)
+		if found {
+			log.WithFields(log.Fields{
+				"input_tokens": inputTokens,
+				"max_tokens":   maxTokens,
+			}).Warn("[CONTEXT_LENGTH_ERROR] Converting to invalid_request_error format for Claude Code compatibility")
+			return buildContextLengthExceededError(inputTokens, maxTokens)
+		}
+		// Even if we can't extract token counts, still convert to invalid_request_error format
+		// with a generic message
+		log.WithFields(log.Fields{
+			"error_preview": truncateString(errText, 200),
+		}).Warn("[CONTEXT_LENGTH_ERROR] Converting to invalid_request_error format (token counts not extracted)")
+		return []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"input_length and max_tokens exceed context limit. Please reduce the length of the messages."}}`)
 	}
 
 	trimmed := strings.TrimSpace(errText)
@@ -139,6 +247,14 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
 	}
 	return payload
+}
+
+// truncateString truncates a string to maxLen characters.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.

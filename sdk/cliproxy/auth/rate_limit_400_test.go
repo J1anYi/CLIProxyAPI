@@ -22,6 +22,11 @@ func TestIsRateLimitDisguisedAs400(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "ModelArts.81011 sensitive info error",
+			err:      &Error{Message: `{"error":{"cause":"{\"error\":{\"code\":\"ModelArts.81011\",\"message\":\"Input text May contain sensitive information, please try again.\",\"param\":null,\"type\":\"Forbidden\"}}"}}`, HTTPStatus: http.StatusBadRequest},
+			expected: true,
+		},
+		{
 			name:     "TooManyRequests type in error",
 			err:      &Error{Message: `{"error":{"type":"TooManyRequests","message":"Rate limit exceeded"}}`, HTTPStatus: http.StatusBadRequest},
 			expected: true,
@@ -202,6 +207,11 @@ func TestDetectRateLimitErrorType(t *testing.T) {
 			name:     "ModelArts.81101 error",
 			err:      &Error{Message: `{"error":{"cause":"{\"error\":{\"code\":\"ModelArts.81101\",\"message\":\"Too many requests\"}}"}}`, HTTPStatus: http.StatusBadRequest},
 			expected: "ModelArts81101",
+		},
+		{
+			name:     "ModelArts.81011 sensitive info error",
+			err:      &Error{Message: `{"error":{"cause":"{\"error\":{\"code\":\"ModelArts.81011\",\"message\":\"Input text May contain sensitive information, please try again.\"}}"}}`, HTTPStatus: http.StatusBadRequest},
+			expected: "ModelArts81011",
 		},
 		{
 			name:     "Decode server is overloaded",
