@@ -204,6 +204,28 @@ nonstream-keepalive-interval: 0
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
+# Example: JD Cloud JDAIP (Anthropic-compatible endpoint for Claude Code)
+# This configuration allows Claude Code to use JD Cloud models without additional authentication.
+# Set ANTHROPIC_BASE_URL=http://localhost:8317 in Claude Code settings.
+# claude-api-key:
+#   - api-key: "pk-xxx"  # JD Cloud API key
+#     base-url: "https://modelservice.jdcloud.com/coding/anthropic"
+#     models:
+#       - name: "DeepSeek-V3.2"
+#         alias: "DeepSeek-V3.2"
+#       - name: "GLM-5"
+#         alias: "GLM-5"
+#       - name: "GLM-4.7"
+#         alias: "GLM-4.7"
+#       - name: "MiniMax-M2.5"
+#         alias: "MiniMax-M2.5"
+#       - name: "Kimi-K2.5"
+#         alias: "Kimi-K2.5"
+#       - name: "Kimi-K2-Turbo"
+#         alias: "Kimi-K2-Turbo"
+#       - name: "Qwen3-Coder"
+#         alias: "Qwen3-Coder"
+
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
 # when the client omits them, while OS/arch remain runtime-derived. When
