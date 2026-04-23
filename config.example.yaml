@@ -37,9 +37,7 @@ auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - "your-secret-key"  # 客户端认证密钥，在 ANTHROPIC_AUTH_TOKEN 中填写
 
 # Enable debug logging
 debug: false
@@ -228,6 +226,21 @@ nonstream-keepalive-interval: 0
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers
+# 京东云 OpenAI API 示例配置
+openai-compatibility:
+  - name: "jdcloud-openai"
+    base-url: "https://modelservice.jdcloud.com/coding/openai/v1"
+    api-key-entries:
+      - api-key: "your-jdcloud-api-key"  # 替换为你的京东云 API Key
+    models:
+      - name: "GLM-5"
+        alias: "GLM-5"
+      - name: "kimi-k2.5"
+        alias: "kimi-k2.5"
+      - name: "MiniMax-M2.5"
+        alias: "MiniMax-M2.5"
+
+# 其他 OpenAI 兼容 provider 示例（已注释）
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
