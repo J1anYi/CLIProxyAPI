@@ -15,6 +15,8 @@ type RateLimitStats struct {
 	decodeServerOverloaded int64
 	error406               int64
 	contextLengthExceeded  int64
+	tcpTimeout             int64
+	connectionReset        int64 // connection reset by peer error
 }
 
 // NewRateLimitStats creates a new stats tracker initialized with today's date.
@@ -69,13 +71,31 @@ func (s *RateLimitStats) IncrementContextLengthExceeded() {
 	s.contextLengthExceeded++
 }
 
-// GetStats returns the current date and counters.
-// If the date has changed, counters are reset before returning.
-func (s *RateLimitStats) GetStats() (date string, modelArts81101, modelArts81011, decodeServerOverloaded, error406, contextLengthExceeded int64) {
+// IncrementTCPTimeout increments the counter for TCP timeout errors.
+// If the date has changed, counters are reset before incrementing.
+func (s *RateLimitStats) IncrementTCPTimeout() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkDateRollover()
-	return s.date, s.modelArts81101, s.modelArts81011, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded
+	s.tcpTimeout++
+}
+
+// IncrementConnectionReset increments the counter for connection reset by peer errors.
+// If the date has changed, counters are reset before incrementing.
+func (s *RateLimitStats) IncrementConnectionReset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkDateRollover()
+	s.connectionReset++
+}
+
+// GetStats returns the current date and counters.
+// If the date has changed, counters are reset before returning.
+func (s *RateLimitStats) GetStats() (date string, modelArts81101, modelArts81011, decodeServerOverloaded, error406, contextLengthExceeded, tcpTimeout, connectionReset int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkDateRollover()
+	return s.date, s.modelArts81101, s.modelArts81011, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded, s.tcpTimeout, s.connectionReset
 }
 
 // checkDateRollover resets counters if the date has changed.
@@ -89,5 +109,7 @@ func (s *RateLimitStats) checkDateRollover() {
 		s.decodeServerOverloaded = 0
 		s.error406 = 0
 		s.contextLengthExceeded = 0
+		s.tcpTimeout = 0
+		s.connectionReset = 0
 	}
 }
