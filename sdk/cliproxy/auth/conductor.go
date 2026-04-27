@@ -2470,7 +2470,6 @@ func isRequestInvalidError(err error) bool {
 // - ModelArts.81011 (sensitive info detection - often false positive, retryable)
 // - Decode server overloaded
 // - 406 errors (temporary model failures)
-// - TCP timeout errors (network issues, retryable)
 // - "TooManyRequests" type in error body
 // - "rate limit" or "rate_limit" in error message
 func isRateLimitDisguisedAs400(err error) bool {
@@ -2496,14 +2495,6 @@ func isRateLimitDisguisedAs400(err error) bool {
 	if strings.Contains(errStr, `"code":406`) {
 		return true
 	}
-	// Check for TCP timeout errors (read tcp ... operation timed out)
-	if strings.Contains(errStr, "operation timed out") && strings.Contains(errStr, "read tcp") {
-		return true
-	}
-	// Check for connection reset by peer errors (read tcp ... connection reset by peer)
-	if strings.Contains(errStr, "connection reset by peer") && strings.Contains(errStr, "read tcp") {
-		return true
-	}
 	// Check for TooManyRequests type in error body
 	if strings.Contains(errStr, `"type":"TooManyRequests"`) ||
 		strings.Contains(errStr, `'type':'TooManyRequests'`) {
@@ -2518,11 +2509,15 @@ func isRateLimitDisguisedAs400(err error) bool {
 		strings.Contains(lowerErr, "exceeded") {
 		return true
 	}
+	// Check for FAILED_RESPONSE status (provider-side temporary failures)
+	if strings.Contains(errStr, `"status":"FAILED_RESPONSE"`) {
+		return true
+	}
 	return false
 }
 
 // detectRateLimitErrorType identifies the specific type of rate limit error.
-// Returns "ModelArts81101", "ModelArts81011", "DecodeServerOverloaded", "Error406", "ContextLengthExceeded", "TCPTimeout", "ConnectionReset", or empty string if not a recognized type.
+// Returns "ModelArts81101", "ModelArts81011", "DecodeServerOverloaded", "Error406", "ContextLengthExceeded", or empty string if not a recognized type.
 func detectRateLimitErrorType(err error) string {
 	if err == nil {
 		return ""
@@ -2543,18 +2538,14 @@ func detectRateLimitErrorType(err error) string {
 	if strings.Contains(errStr, `"code":406`) {
 		return "Error406"
 	}
-	// Check for TCP timeout errors
-	if strings.Contains(errStr, "operation timed out") && strings.Contains(errStr, "read tcp") {
-		return "TCPTimeout"
-	}
-	// Check for connection reset by peer errors
-	if strings.Contains(errStr, "connection reset by peer") && strings.Contains(errStr, "read tcp") {
-		return "ConnectionReset"
-	}
 	// Check for context length exceeded (for logging only, not retry)
 	if strings.Contains(lowerErr, "exceeds the model's maximum context length") ||
 		strings.Contains(lowerErr, "requested token count exceeds") {
 		return "ContextLengthExceeded"
+	}
+	// Check for FAILED_RESPONSE status
+	if strings.Contains(errStr, `"status":"FAILED_RESPONSE"`) {
+		return "FailedResponse"
 	}
 	return ""
 }
@@ -2568,7 +2559,7 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 	errorType := detectRateLimitErrorType(err)
 	if errorType == "ContextLengthExceeded" && m.rateLimitStats != nil {
 		m.rateLimitStats.IncrementContextLengthExceeded()
-		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset, failedResp := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     errorType,
 			"model_arts_81101_today":         modelArts81101,
@@ -2578,6 +2569,7 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 			"context_length_exceeded_today":  ctxLen,
 			"tcp_timeout_today":              tcpTimeout,
 			"connection_reset_today":         connectionReset,
+			"failed_response_today":          failedResp,
 			"date":                           date,
 		}).Warn("[RATE_LIMIT_STATS] Context length exceeded (not retryable)")
 		return false // Not retryable
@@ -2598,14 +2590,12 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 			m.rateLimitStats.IncrementDecodeServerOverloaded()
 		case "Error406":
 			m.rateLimitStats.IncrementError406()
-		case "TCPTimeout":
-			m.rateLimitStats.IncrementTCPTimeout()
-		case "ConnectionReset":
-			m.rateLimitStats.IncrementConnectionReset()
+		case "FailedResponse":
+			m.rateLimitStats.IncrementFailedResponse()
 		}
 
 		// Log with current stats
-		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset, failedResp := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     errorType,
 			"model_arts_81101_today":         modelArts81101,
@@ -2615,6 +2605,7 @@ func (m *Manager) checkRateLimitWithStats(err error) bool {
 			"context_length_exceeded_today":  ctxLen,
 			"tcp_timeout_today":              tcpTimeout,
 			"connection_reset_today":         connectionReset,
+			"failed_response_today":          failedResp,
 			"date":                           date,
 		}).Warn("[RATE_LIMIT_STATS] Rate limit error detected")
 	}
@@ -2629,7 +2620,7 @@ func (m *Manager) checkError406WithStats(err error) bool {
 		m.rateLimitStats.IncrementError406()
 
 		// Log with current stats
-		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset := m.rateLimitStats.GetStats()
+		date, modelArts81101, modelArts81011, decodeServer, error406, ctxLen, tcpTimeout, connectionReset, failedResp := m.rateLimitStats.GetStats()
 		log.WithFields(log.Fields{
 			"error_type":                     "Error406",
 			"model_arts_81101_today":         modelArts81101,
@@ -2639,6 +2630,7 @@ func (m *Manager) checkError406WithStats(err error) bool {
 			"context_length_exceeded_today":  ctxLen,
 			"tcp_timeout_today":              tcpTimeout,
 			"connection_reset_today":         connectionReset,
+			"failed_response_today":          failedResp,
 			"date":                           date,
 		}).Warn("[RATE_LIMIT_STATS] 406 error detected")
 	}

@@ -17,6 +17,7 @@ type RateLimitStats struct {
 	contextLengthExceeded  int64
 	tcpTimeout             int64
 	connectionReset        int64 // connection reset by peer error
+	failedResponse         int64 // FAILED_RESPONSE status errors
 }
 
 // NewRateLimitStats creates a new stats tracker initialized with today's date.
@@ -89,13 +90,22 @@ func (s *RateLimitStats) IncrementConnectionReset() {
 	s.connectionReset++
 }
 
-// GetStats returns the current date and counters.
-// If the date has changed, counters are reset before returning.
-func (s *RateLimitStats) GetStats() (date string, modelArts81101, modelArts81011, decodeServerOverloaded, error406, contextLengthExceeded, tcpTimeout, connectionReset int64) {
+// IncrementFailedResponse increments the counter for FAILED_RESPONSE status errors.
+// If the date has changed, counters are reset before incrementing.
+func (s *RateLimitStats) IncrementFailedResponse() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkDateRollover()
-	return s.date, s.modelArts81101, s.modelArts81011, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded, s.tcpTimeout, s.connectionReset
+	s.failedResponse++
+}
+
+// GetStats returns the current date and counters.
+// If the date has changed, counters are reset before returning.
+func (s *RateLimitStats) GetStats() (date string, modelArts81101, modelArts81011, decodeServerOverloaded, error406, contextLengthExceeded, tcpTimeout, connectionReset, failedResponse int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkDateRollover()
+	return s.date, s.modelArts81101, s.modelArts81011, s.decodeServerOverloaded, s.error406, s.contextLengthExceeded, s.tcpTimeout, s.connectionReset, s.failedResponse
 }
 
 // checkDateRollover resets counters if the date has changed.
@@ -111,5 +121,6 @@ func (s *RateLimitStats) checkDateRollover() {
 		s.contextLengthExceeded = 0
 		s.tcpTimeout = 0
 		s.connectionReset = 0
+		s.failedResponse = 0
 	}
 }

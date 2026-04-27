@@ -233,6 +233,11 @@ func TestDetectRateLimitErrorType(t *testing.T) {
 			err:      &Error{Message: "Something went wrong", HTTPStatus: http.StatusBadRequest},
 			expected: "",
 		},
+		{
+			name:     "FAILED_RESPONSE status",
+			err:      &Error{Message: `{"error":{"cause":"","code":400,"message":"","status":"FAILED_RESPONSE"},"requestId":"test-id","result":null}`, HTTPStatus: http.StatusBadRequest},
+			expected: "FailedResponse",
+		},
 	}
 
 	for _, tt := range tests {
